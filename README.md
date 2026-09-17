@@ -126,6 +126,92 @@ reload it. Only ports 80 and 443 need to be open.
 The stack assumes Caddy is the only way in: Moodle trusts `X-Forwarded-For`
 and treats every request as HTTPS. Keep `MOODLE_HTTP_BIND` on `127.0.0.1`.
 
+### Shipping a locally built image
+
+The droplet doesn't need to build anything. Compose looks for
+`${MOODLE_IMAGE}:${MOODLE_VERSION}` (default `vatusa/moodle:v5.2.3`), so tag the
+image to match `.env` before sending it:
+
+```sh
+docker build --build-arg MOODLE_VERSION=v5.2.3 -t vatusa/moodle:v5.2.3 .
+docker save vatusa/moodle:v5.2.3 | ssh -C <droplet> docker load
+ssh <droplet> 'cd /opt/moodle-docker/deploy && docker compose up -d'
+```
+
+Leave off `--build` on the droplet. If the tag isn't there, `up` falls back to
+building the image on the droplet.
+
+### Sizing
+
+**Use 2 vCPU / 4 GB RAM.** Memory is the limit, not CPU. On DigitalOcean
+(prices as of 2026-09):
+
+| Droplet | vCPU / RAM / disk | $/month | |
+|---|---|---|---|
+| `s-2vcpu-4gb` (Basic) | 2 shared / 4 GB / 80 GB | 24 | Enough for this workload |
+| `g5-2vcpu-4gb-30gb` (General Purpose) | 2 dedicated / 4 GB / 30 GB | 56.75 | Smallest General Purpose size; `-50gb` is 58.79 |
+| `s-1vcpu-2gb` (Basic) | 1 shared / 2 GB / 50 GB | 12 | Too small; see below |
+
+**Current load.** The old academy droplet (`s-1vcpu-2gb-70gb-intel`, with MySQL
+on the managed cluster, not on the droplet) showed over 14 days:
+
+- CPU: 10% median, 29% at its highest.
+- Memory: 650 MB median, 1.5 GB at peak.
+
+The metrics are sampled coarsely, so short spikes are smoothed out.
+
+**Load test.** Measured 2026-09-16 on the local stack with Moodle 5.2.3:
+
+- A test course with 100 users and 64 activities (`tool_generator`, size S).
+- Logged-in users clicking through the dashboard, course and activity pages
+  with no pause between pages.
+- All containers pinned to the same CPUs (i7-12700K).
+
+| CPUs | Concurrent users | Pages/s | Median / p95 |
+|---|---|---|---|
+| 1 hyperthread | 4 | 21 | 180 / 257 ms |
+| 1 hyperthread | 25 | 15 | 1.5 / 2.0 s |
+| 2 hyperthreads (1 core) | 10 | 24 | 400 / 550 ms |
+| 2 physical cores | 10 | 42 | 230 / 330 ms |
+
+A droplet vCPU is slower than these cores. Expect roughly half the throughput,
+about 10–20 pages/s on 2 vCPUs. A real user loads a page every 20–30 s or so,
+which works out to a few hundred people active at once.
+
+The test did not cover file uploads, video, quiz submissions, large reports,
+or cold caches after a deploy.
+
+**Memory on a 4 GB droplet:**
+
+| | Typical | Worst case |
+|---|---|---|
+| MySQL (default `MYSQL_INNODB_BUFFER_POOL_SIZE=1G`) | ~1.3 GB | ~1.5 GB |
+| web (Apache + PHP) | 150–450 MB (up to 33 workers in the test, ~10–15 MB private each) | Grows with busy workers |
+| cron | ~50 MB | Up to 512 MB (`PHP_MEMORY_LIMIT`) during heavy tasks |
+| Valkey, Docker, host Caddy, OS | ~400 MB | |
+| **Total** | **~2.3 GB** | **~3.2 GB** |
+
+On 2 GB, MySQL has to shrink to about 256 MB and the droplet needs swap. Even
+then, one heavy cron task or a burst of traffic can trigger the OOM killer, and
+`docker load` adds pressure of its own.
+
+**Disk.** The Moodle image is 1.8 GB, and `docker load` briefly needs about as
+much again. Add the MySQL image, the OS, the database, moodledata, and 14 days
+of local backups. A fresh install is tiny (16 MB database, 23 MB moodledata),
+but uploads and backups grow. 30 GB is workable only if backups are copied off
+the droplet and pruned; 50 GB or more is more comfortable.
+
+**Before going live on a small droplet:**
+
+1. **Cap Apache workers.** The image still uses Apache's default
+   `MaxRequestWorkers 150`. A burst of heavy requests could use far more memory
+   than the droplet has; a cap around 25–40 is safer. The image has no setting
+   for this yet.
+2. **Add a 2 GB swap file.** Droplets ship without swap, and it's a cheap
+   safety net.
+3. **Set the MySQL buffer pool.** `MYSQL_INNODB_BUFFER_POOL_SIZE` can stay at
+   `1G` on 4 GB; `512M` is plenty for a long while at the current database size.
+
 ### Upgrading Moodle
 
 ```sh
