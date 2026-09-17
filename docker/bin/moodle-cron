@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Long-running Moodle cron worker (run as its own container from this image).
+# Each cron.php pass keeps polling for tasks for MOODLE_CRON_KEEPALIVE seconds,
+# then exits and a fresh process starts, which bounds memory growth.
+set -uo pipefail
+
+cd "${MOODLE_DIR:-/var/www/moodle}"
+
+child=0
+trap 'if ((child)); then kill -TERM "$child"; wait "$child"; fi; exit 0' TERM INT
+
+while true; do
+    php admin/cli/cron.php --keep-alive="${MOODLE_CRON_KEEPALIVE:-300}" &
+    child=$!
+    wait "$child" || echo "moodle-cron: cron.php exited with status $?" >&2
+    child=0
+    sleep "${MOODLE_CRON_INTERVAL:-5}"
+done

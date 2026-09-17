@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Install Moodle into an empty database, or upgrade an existing one to the code
+# in this image. Safe to run on every deploy; run it once (compose one-shot
+# service / Kubernetes Job), never from several containers at the same time.
+#
+# First install needs MOODLE_ADMIN_PASSWORD; see the other MOODLE_ADMIN_* and
+# MOODLE_SITE_* variables below.
+set -euo pipefail
+
+cd "${MOODLE_DIR:-/var/www/moodle}"
+
+wait_seconds="${MOODLE_DB_WAIT_SECONDS:-120}"
+state=""
+for ((i = 0; i < wait_seconds; i += 2)); do
+    # Prints "installed" or "empty"; exits non-zero if the DB is unreachable.
+    if state="$(php -d display_errors=stderr -r '
+        define("CLI_SCRIPT", true);
+        define("CACHE_DISABLE_ALL", true);
+        require "config.php";
+        echo $DB->get_tables(false) ? "installed" : "empty";
+    ' 2>/dev/null)"; then
+        break
+    fi
+    echo "moodle-bootstrap: waiting for database..."
+    sleep 2
+done
+
+case "$state" in
+    empty)
+        if [[ -z "${MOODLE_ADMIN_PASSWORD:-}" ]]; then
+            echo "moodle-bootstrap: database is empty; set MOODLE_ADMIN_PASSWORD to install" >&2
+            exit 1
+        fi
+        echo "moodle-bootstrap: installing Moodle"
+        exec php admin/cli/install_database.php \
+            --agree-license \
+            --lang="${MOODLE_LANG:-en}" \
+            --adminuser="${MOODLE_ADMIN_USER:-admin}" \
+            --adminpass="$MOODLE_ADMIN_PASSWORD" \
+            --adminemail="${MOODLE_ADMIN_EMAIL:-}" \
+            --fullname="${MOODLE_SITE_FULLNAME:-Moodle}" \
+            --shortname="${MOODLE_SITE_SHORTNAME:-moodle}" \
+            ${MOODLE_SUPPORT_EMAIL:+--supportemail="$MOODLE_SUPPORT_EMAIL"} \
+            ${MOODLE_NOREPLY_ADDRESS:+--noreplyemail="$MOODLE_NOREPLY_ADDRESS"}
+        ;;
+    installed)
+        rc=0
+        php admin/cli/upgrade.php --is-pending >/dev/null || rc=$?
+        if ((rc == 0)); then
+            echo "moodle-bootstrap: no upgrade pending"
+            exit 0
+        elif ((rc != 2)); then
+            echo "moodle-bootstrap: upgrade check failed (exit $rc)" >&2
+            exit "$rc"
+        fi
+        echo "moodle-bootstrap: upgrading Moodle"
+        php admin/cli/upgrade.php --non-interactive
+        php admin/cli/purge_caches.php
+        ;;
+    *)
+        echo "moodle-bootstrap: database not reachable after ${wait_seconds}s" >&2
+        exit 1
+        ;;
+esac
