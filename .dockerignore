@@ -5,3 +5,6 @@ README.md
 LICENSE.md
 *.env
 .env*
+deploy/
+CLAUDE.md
+.gitignore

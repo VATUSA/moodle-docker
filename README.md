@@ -5,10 +5,15 @@ deploy to Kubernetes through `gitops`.
 
 The default build is **Moodle 5.2.3 on PHP 8.4 (Debian trixie, Apache + mod_php)**.
 
+To try it locally (throwaway passwords, plain HTTP):
+
 ```sh
 docker compose up -d --build   # MySQL 8.4 + Valkey + Moodle web + cron
 open http://localhost:8080     # admin / Admin-1234!
 ```
+
+For a real deployment on a single server, use `deploy/` (see
+[Running on a VPS](#running-on-a-vps)).
 
 ## How the image works
 
@@ -48,6 +53,7 @@ One image does three jobs. You pick the job with the container command:
 | `MOODLE_DB_SSL` | – | `require` or `verify-full` (DO managed MySQL needs TLS) |
 | `MOODLE_SSLPROXY` | `false` | Set to `true` behind a TLS-terminating ingress |
 | `MOODLE_REVERSEPROXY` | `false` | |
+| `MOODLE_TRUST_X_FORWARDED_FOR` | `false` | Use `X-Forwarded-For` for the client IP. Only when the container is reachable solely through a proxy that overwrites that header |
 | `MOODLE_REDIS_HOST` / `_PORT` / `_DB` / `_PASSWORD` / `_PREFIX` / `_TLS` | – | Setting the host turns on Redis sessions |
 | `MOODLE_SMTP_HOSTS` / `_SECURE` / `_AUTHTYPE` / `_USER` / `_PASSWORD` | – | Forces SMTP settings; otherwise they're set in the admin UI |
 | `MOODLE_NOREPLY_ADDRESS` | – | |
@@ -56,8 +62,8 @@ One image does three jobs. You pick the job with the container command:
 | `MOODLE_CRON_KEEPALIVE` | `300` | `moodle-cron`: seconds each cron.php run keeps polling |
 | `MOODLE_ADMIN_PASSWORD` | – | `moodle-bootstrap`: required for a first install. Also `MOODLE_ADMIN_USER`, `MOODLE_ADMIN_EMAIL`, `MOODLE_SITE_FULLNAME`, `MOODLE_SITE_SHORTNAME`, `MOODLE_LANG`, `MOODLE_SUPPORT_EMAIL` |
 
-Any `MOODLE_*` variable can also be passed as `MOODLE_*_FILE`, a path to a
-file that holds the value.
+Any `MOODLE_*` variable read by `config.php`, plus `MOODLE_ADMIN_PASSWORD`, can
+also be passed as `MOODLE_*_FILE`, a path to a file that holds the value.
 
 ### Build arguments
 
@@ -89,6 +95,67 @@ These come from `public/admin/environment.xml` in Moodle 5.2.3:
 
 With this image, Moodle's own environment check passes with no failures, and
 the `admin/cli/checks.php` status and performance checks all come back OK.
+
+## Running on a VPS
+
+`deploy/` runs the stack with Docker Compose on one server, behind a Caddy
+installed on the host:
+
+| File | |
+|---|---|
+| `deploy/compose.yaml` | web, cron, bootstrap, MySQL 8.4, Valkey. Web is published on `127.0.0.1:8080` only |
+| `deploy/.env.example` | Domain, Moodle version, admin/site details, SMTP, MySQL buffer pool, backup settings |
+| `deploy/init-secrets.sh` | Generates DB, root and admin passwords into `deploy/secrets/` (Docker secrets) |
+| `deploy/Caddyfile.example` | Site block for the host's Caddy |
+| `deploy/backup.sh` | Database dump + moodledata tarball, with retention |
+
+`deploy/.env`, `deploy/secrets/` and `deploy/backups/` are git-ignored.
+
+### First deploy
+
+```sh
+git clone <this repo> /opt/moodle-docker && cd /opt/moodle-docker/deploy
+cp .env.example .env && $EDITOR .env    # MOODLE_DOMAIN, MOODLE_ADMIN_EMAIL, SMTP, ...
+./init-secrets.sh                       # prints the admin password
+docker compose up -d --build            # builds the image, installs Moodle, starts web + cron
+```
+
+Then add `Caddyfile.example` (with your domain) to the host's Caddy config and
+reload it. Only ports 80 and 443 need to be open.
+
+The stack assumes Caddy is the only way in: Moodle trusts `X-Forwarded-For`
+and treats every request as HTTPS. Keep `MOODLE_HTTP_BIND` on `127.0.0.1`.
+
+### Upgrading Moodle
+
+```sh
+./backup.sh
+$EDITOR .env                            # bump MOODLE_VERSION
+docker compose up -d --build
+```
+
+`bootstrap` runs the upgrade (Moodle puts itself in maintenance mode while it
+runs) before web and cron are replaced. It runs on every `up`, and does nothing
+when no upgrade is pending. Check `docker compose logs bootstrap` if `up` fails.
+
+### Backups
+
+`backup.sh` dumps the database with `mysqldump --single-transaction` and tars
+moodledata (without caches, sessions and temp files) while the site is running.
+Schedule it from the host's crontab and copy `deploy/backups/` off the server.
+moodledata includes `secret/key/sodium.key`, which Moodle needs to decrypt
+stored secrets; a database backup without it is incomplete.
+
+To restore into an empty stack (same `deploy/secrets/`):
+
+```sh
+docker compose up -d --wait db valkey
+zcat backups/moodle-db-<stamp>.sql.gz | docker compose exec -T db sh -c \
+    'MYSQL_PWD="$(cat /run/secrets/db_root_password)" exec mysql -uroot moodle'
+docker compose run --rm --no-deps -T --entrypoint tar web \
+    -C /var/www/moodledata -xzf - < backups/moodledata-<stamp>.tar.gz
+docker compose up -d
+```
 
 ## Staying current
 

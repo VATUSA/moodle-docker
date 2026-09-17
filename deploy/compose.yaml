@@ -1,0 +1,141 @@
+# Production stack for a single host: Moodle web, cron, MySQL 8.4 and Valkey.
+# TLS is terminated by Caddy running on the host, which proxies to the web
+# container on 127.0.0.1:8080 (see Caddyfile.example). See "Running on a VPS"
+# in ../README.md.
+#
+#   cp .env.example .env && $EDITOR .env
+#   ./init-secrets.sh
+#   docker compose up -d --build
+
+name: moodle
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+x-moodle: &moodle
+  image: ${MOODLE_IMAGE:-vatusa/moodle}:${MOODLE_VERSION:?set MOODLE_VERSION in .env}
+  build:
+    context: ..
+    args:
+      MOODLE_VERSION: ${MOODLE_VERSION}
+  logging: *logging
+  environment: &moodle-env
+    MOODLE_WWWROOT: https://${MOODLE_DOMAIN:?set MOODLE_DOMAIN in .env}
+    MOODLE_SSLPROXY: "true"
+    MOODLE_TRUST_X_FORWARDED_FOR: "true"
+    MOODLE_DB_TYPE: mysqli
+    MOODLE_DB_HOST: db
+    MOODLE_DB_NAME: moodle
+    MOODLE_DB_USER: moodle
+    MOODLE_DB_PASSWORD_FILE: /run/secrets/db_password
+    MOODLE_REDIS_HOST: valkey
+    MOODLE_SMTP_HOSTS: ${MOODLE_SMTP_HOSTS:-}
+    MOODLE_SMTP_SECURE: ${MOODLE_SMTP_SECURE:-tls}
+    MOODLE_SMTP_AUTHTYPE: ${MOODLE_SMTP_AUTHTYPE:-LOGIN}
+    MOODLE_SMTP_USER: ${MOODLE_SMTP_USER:-}
+    MOODLE_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+    MOODLE_NOREPLY_ADDRESS: ${MOODLE_NOREPLY_ADDRESS:-}
+    PHP_TIMEZONE: ${PHP_TIMEZONE:-UTC}
+    PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-512M}
+    PHP_UPLOAD_MAX_FILESIZE: ${PHP_UPLOAD_MAX_FILESIZE:-200M}
+    PHP_POST_MAX_SIZE: ${PHP_POST_MAX_SIZE:-206M}
+  secrets: [db_password, smtp_password]
+  volumes:
+    - moodledata:/var/www/moodledata
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    logging: *logging
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-1G}
+      - --max-allowed-packet=64M
+      - --disable-log-bin
+      - --skip-name-resolve
+    environment:
+      MYSQL_DATABASE: moodle
+      MYSQL_USER: moodle
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+    secrets: [db_password, db_root_password]
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      start_period: 60s
+      retries: 30
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    logging: *logging
+    # Holds sessions only; a restart logs users out but loses nothing else.
+    command: ["valkey-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+
+  # One-shot: installs into an empty DB or applies a pending upgrade. Runs on
+  # every `docker compose up`; web and cron only (re)start after it succeeds.
+  bootstrap:
+    <<: *moodle
+    command: ["moodle-bootstrap"]
+    restart: "no"
+    healthcheck:
+      disable: true
+    environment:
+      <<: *moodle-env
+      MOODLE_ADMIN_USER: ${MOODLE_ADMIN_USER:-admin}
+      MOODLE_ADMIN_PASSWORD_FILE: /run/secrets/moodle_admin_password
+      MOODLE_ADMIN_EMAIL: ${MOODLE_ADMIN_EMAIL:?set MOODLE_ADMIN_EMAIL in .env}
+      MOODLE_SITE_FULLNAME: ${MOODLE_SITE_FULLNAME:-Moodle}
+      MOODLE_SITE_SHORTNAME: ${MOODLE_SITE_SHORTNAME:-moodle}
+      MOODLE_SUPPORT_EMAIL: ${MOODLE_SUPPORT_EMAIL:-}
+    secrets: [db_password, smtp_password, moodle_admin_password]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    <<: *moodle
+    restart: unless-stopped
+    # Loopback only: reachable just by the host's Caddy. Never publish this
+    # publicly; MOODLE_TRUST_X_FORWARDED_FOR relies on it.
+    ports:
+      - "${MOODLE_HTTP_BIND:-127.0.0.1:8080}:8080"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_started
+
+  cron:
+    <<: *moodle
+    command: ["moodle-cron"]
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_started
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  db_root_password:
+    file: ./secrets/db_root_password
+  moodle_admin_password:
+    file: ./secrets/moodle_admin_password
+  smtp_password:
+    file: ./secrets/smtp_password
+
+volumes:
+  dbdata:
+  moodledata:

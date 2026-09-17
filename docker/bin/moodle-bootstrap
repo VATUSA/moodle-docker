@@ -9,6 +9,16 @@ set -euo pipefail
 
 cd "${MOODLE_DIR:-/var/www/moodle}"
 
+# Like config.php: VAR may instead be given as VAR_FILE (Docker secrets).
+file_env() {
+    local var="$1" file_var="${1}_FILE"
+    if [[ -n "${!file_var:-}" ]]; then
+        [[ -r "${!file_var}" ]] || { echo "moodle-bootstrap: $file_var is not readable" >&2; exit 1; }
+        export "$var"="$(<"${!file_var}")"
+    fi
+}
+file_env MOODLE_ADMIN_PASSWORD
+
 wait_seconds="${MOODLE_DB_WAIT_SECONDS:-120}"
 state=""
 for ((i = 0; i < wait_seconds; i += 2)); do

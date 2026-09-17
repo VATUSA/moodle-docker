@@ -1,0 +1,13 @@
+# Site block for the host's Caddy (e.g. append to /etc/caddy/Caddyfile, then
+# `systemctl reload caddy`). Replace the domain with MOODLE_DOMAIN from .env.
+#
+# Caddy replaces any client-supplied X-Forwarded-For with the real client IP,
+# which is what makes MOODLE_TRUST_X_FORWARDED_FOR safe. Do not add
+# `trusted_proxies` unless another proxy/CDN sits in front of Caddy.
+moodle.example.com {
+	encode zstd gzip
+
+	header Strict-Transport-Security "max-age=31536000"
+
+	reverse_proxy 127.0.0.1:8080
+}

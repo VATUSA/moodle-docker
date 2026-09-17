@@ -1,7 +1,8 @@
 # CLAUDE.md
 
-Production container image for Moodle LMS, deployed to Kubernetes via the `gitops`
-repo (manifests live there, not here). `README.md` is the user-facing reference
+Production container image for Moodle LMS. It is deployed first with Docker Compose
+on a VPS behind a host-installed Caddy (`deploy/`); Kubernetes via `gitops` may come
+later. `README.md` is the user-facing reference
 (env vars, build args, requirements); keep it in sync with any behavior change.
 
 ## Layout
@@ -15,7 +16,8 @@ repo (manifests live there, not here). `README.md` is the user-facing reference
 | `docker/bin/moodle-bootstrap` | Install into an empty DB or apply pending upgrade (one-shot job) |
 | `docker/bin/moodle-cron` | Long-running cron loop |
 | `plugins/` | Third-party plugins, laid out like the Moodle web root |
-| `docker-compose.yml` | Local test stack: MySQL 8.4, Valkey, bootstrap, web, cron |
+| `docker-compose.yml` | Local test stack only (hardcoded passwords, plain HTTP) |
+| `deploy/` | Production Compose stack for a VPS: `compose.yaml`, `.env.example`, `init-secrets.sh`, `Caddyfile.example`, `backup.sh` |
 
 ## Commands
 
@@ -31,6 +33,12 @@ docker compose down -v                                 # tear down, including DB
 There is no test suite; verify changes by building and running the compose stack
 (bootstrap exits 0, `/healthz` and `/login/index.php` return 200, admin login works).
 
+To test `deploy/` without touching the dev stack, copy the repo to a scratch dir, set
+`MOODLE_DOMAIN=localhost:18443` and `MOODLE_HTTP_BIND=127.0.0.1:18080` in `.env`, run
+with `COMPOSE_PROJECT_NAME=moodle-prodtest`, and stand in for the host Caddy with
+`docker run --network host caddy:2.10` using a `localhost:18443` site block. Moodle
+redirects any request whose host doesn't match `wwwroot`, so test through Caddy.
+
 ## Design rules
 
 - Code is immutable: owned by root in `/var/www/moodle`, served from `public/`
@@ -43,6 +51,11 @@ There is no test suite; verify changes by building and running the compose stack
   the latter two since they don't serve HTTP.
 - New configuration goes into `config.php` as an env var (with a sane default)
   and gets a row in the README's env var table.
+- `deploy/` assumes Caddy on the host is the only entry point: web binds to loopback,
+  `MOODLE_SSLPROXY` and `MOODLE_TRUST_X_FORWARDED_FOR` are on. Don't publish web
+  publicly or put Caddy in the compose file.
+- Secrets in `deploy/` are Docker secrets files read via `*_FILE`; the files must be
+  world-readable (containers run as www-data/mysql), protected by the 0700 directory.
 - Plugins are added to `plugins/` at build time; after adding one, rebuild and run
   `moodle-bootstrap`.
 

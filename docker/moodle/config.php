@@ -58,6 +58,12 @@ $CFG->directorypermissions = 02770;
 // Running behind a TLS-terminating reverse proxy / ingress.
 $CFG->sslproxy     = $moodleenvbool('MOODLE_SSLPROXY');
 $CFG->reverseproxy = $moodleenvbool('MOODLE_REVERSEPROXY');
+// Take the client IP from X-Forwarded-For. Only enable when the container is
+// reachable solely through a proxy that overwrites that header (Caddy does by
+// default); otherwise clients can spoof their IP. 1 = GETREMOTEADDR_SKIP_HTTP_CLIENT_IP.
+if ($moodleenvbool('MOODLE_TRUST_X_FORWARDED_FOR')) {
+    $CFG->getremoteaddrconf = 1;
+}
 
 // Apache sends unknown paths to r.php (FallbackResource), so the router works.
 $CFG->routerconfigured = true;

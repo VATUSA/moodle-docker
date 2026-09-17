@@ -1,4 +1,5 @@
-# Local stack for trying the image: MySQL 8.4 + Valkey + Moodle web + cron.
+# Local stack for trying the image (throwaway passwords, plain HTTP):
+# MySQL 8.4 + Valkey + Moodle web + cron. For production see deploy/.
 #   docker compose up -d --build
 #   open http://localhost:8080  (admin / see MOODLE_ADMIN_PASSWORD)
 
